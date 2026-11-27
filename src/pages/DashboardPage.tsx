@@ -19,12 +19,15 @@ import { Card } from '../components/common/Card';
 import { Button } from '../components/common/Button';
 import { Badge } from '../components/common/Badge';
 import { EmptyState } from '../components/common/EmptyState';
+import { getAiProviderStatus, getApprovalPolicyStatus } from '../utils/aiWorkflow';
 
 export const DashboardPage: React.FC = () => {
   const { health, loading: healthLoading, error: healthError } = useHealth();
   const { projects, loading: projectsLoading } = useProjects();
 
   const isConnected = !healthLoading && !healthError && health !== null;
+  const aiStatus = getAiProviderStatus(health, healthLoading, healthError);
+  const approvalStatus = getApprovalPolicyStatus(health, healthLoading, healthError);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
@@ -93,7 +96,7 @@ export const DashboardPage: React.FC = () => {
             <div className="flex items-center justify-between">
               <span className="text-xs text-surface-400">Database Engine:</span>
               <span className="text-xs font-mono text-surface-200">
-                {health?.database_url_configured ? 'SQLite (Live)' : 'None'}
+                {!health ? (healthLoading ? 'Checking...' : 'Unavailable') : health.database_url_configured ? 'Configured (Live)' : 'Not Configured'}
               </span>
             </div>
           </div>
@@ -107,21 +110,23 @@ export const DashboardPage: React.FC = () => {
           footer={
             <div className="flex items-center justify-between font-mono text-[11px]">
               <span className="text-surface-500">Generation Gate:</span>
-              <span className="text-amber-400 font-medium">No Provider Configured</span>
+              <span className={aiStatus.gateTextClass}>{aiStatus.gateLabel}</span>
             </div>
           }
         >
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs text-surface-400">Active Provider:</span>
-              <Badge variant="warning">{health?.ai_provider || 'none (clean)'}</Badge>
+              <Badge variant={aiStatus.badgeVariant}>{aiStatus.badgeLabel}</Badge>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-xs text-surface-400">Pluggable Interface:</span>
-              <span className="text-xs font-mono text-emerald-400">Ready</span>
+              <span className={`text-xs font-mono ${aiStatus.state === 'unavailable' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                {aiStatus.state === 'unavailable' ? 'Offline' : 'Ready'}
+              </span>
             </div>
             <p className="text-[11px] text-surface-400 leading-relaxed">
-              No simulated fake generation. Explicit AI API keys required before code generation is triggered.
+              {aiStatus.description}
             </p>
           </div>
         </Card>
@@ -134,21 +139,21 @@ export const DashboardPage: React.FC = () => {
           footer={
             <div className="flex items-center justify-between font-mono text-[11px]">
               <span className="text-surface-500">Approval Policy:</span>
-              <span className="text-emerald-400 font-medium">Strict Enforced</span>
+              <span className={`font-medium ${approvalStatus.textClass}`}>{approvalStatus.policyLabel}</span>
             </div>
           }
         >
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs text-surface-400">Human Approval:</span>
-              <Badge variant="success">Required</Badge>
+              <Badge variant={approvalStatus.badgeVariant}>{approvalStatus.badgeLabel}</Badge>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-xs text-surface-400">Host Process Isolation:</span>
               <span className="text-xs font-mono text-surface-200">Enabled</span>
             </div>
             <p className="text-[11px] text-surface-400 leading-relaxed">
-              Generated code runs only within isolated sandbox containers. Zero arbitrary host execution.
+              AI proposals never write project files automatically; explicit human approval is required before changes are applied.
             </p>
           </div>
         </Card>

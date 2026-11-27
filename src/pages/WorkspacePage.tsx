@@ -31,6 +31,15 @@ import {
 import { Button } from '../components/common/Button';
 import { Badge } from '../components/common/Badge';
 import { CodeMirrorEditor } from '../components/editor/CodeMirrorEditor';
+import {
+  executeApprovalAction,
+  executeRejectionAction,
+  findActivePendingJob,
+  getAiProviderStatus,
+  getApprovalPolicyStatus,
+  parseProposedChanges,
+  reconcileSelectedFile,
+} from '../utils/aiWorkflow';
 
 export const WorkspacePage: React.FC = () => {
   const {
@@ -45,21 +54,30 @@ export const WorkspacePage: React.FC = () => {
     deleteFile,
     fetchProjectFiles,
   } = useProjects();
-  const { health } = useHealth();
+  const { health, loading: healthLoading, error: healthError } = useHealth();
+  const aiStatus = getAiProviderStatus(health, healthLoading, healthError);
+  const approvalStatus = getApprovalPolicyStatus(health, healthLoading, healthError);
 
   // File explorer selection state
   const [selectedFile, setSelectedFile] = useState<ProjectFile | null>(null);
 
-  // Auto-select first file when currentFiles changes
+  // Synchronize selectedFile whenever currentFiles changes (updates content, handles deletions/creations)
   useEffect(() => {
-    if (currentFiles.length > 0) {
-      if (!selectedFile || !currentFiles.some((f) => f.id === selectedFile.id)) {
-        setSelectedFile(currentFiles[0]);
+    setSelectedFile((prev) => {
+      const next = reconcileSelectedFile(currentFiles, prev);
+      if (
+        prev &&
+        next &&
+        prev.id === next.id &&
+        prev.content === next.content &&
+        prev.updated_at === next.updated_at &&
+        prev.language === next.language
+      ) {
+        return prev;
       }
-    } else {
-      setSelectedFile(null);
-    }
-  }, [currentFiles, selectedFile]);
+      return next;
+    });
+  }, [currentFiles]);
 
   // Prompt chat state
   const [promptInput, setPromptInput] = useState('');
@@ -128,24 +146,21 @@ export const WorkspacePage: React.FC = () => {
         if (existingPrompts && existingPrompts.length > 0) {
           const msgs: ChatMessage[] = [...defaultMsgs];
 
-          // Check if there is a pending job on the latest prompt
-          const latestPrompt = existingPrompts[0];
-          if (latestPrompt && latestPrompt.generation_job_id) {
-            try {
-              const job = await jobsApi.getGenerationJob(latestPrompt.generation_job_id);
-              if (cancelled) return;
-              if (job.status === 'pending_review' && job.proposed_changes_json) {
-                setPendingJob(job);
-                const changes = JSON.parse(job.proposed_changes_json) as ProposedChange[];
-                setProposedChanges(changes);
-                if (changes.length > 0) {
-                  setSelectedProposedFile(changes[0]);
-                }
-              }
-            } catch (jobErr: any) {
-              if (!cancelled) {
-                setErrorMessage(jobErr.message || 'Failed to load pending generation job');
-              }
+          // Scan across prompts (newest first) for any active pending_review generation job
+          try {
+            const pendingResolution = await findActivePendingJob(
+              existingPrompts,
+              jobsApi.getGenerationJob
+            );
+            if (cancelled) return;
+            if (pendingResolution) {
+              setPendingJob(pendingResolution.job);
+              setProposedChanges(pendingResolution.changes);
+              setSelectedProposedFile(pendingResolution.changes[0] || null);
+            }
+          } catch (jobErr: any) {
+            if (!cancelled) {
+              setErrorMessage(jobErr.message || 'Failed to load pending generation job');
             }
           }
 
@@ -295,19 +310,18 @@ export const WorkspacePage: React.FC = () => {
       if (promptRes.generation_job_id) {
         try {
           const job = await jobsApi.getGenerationJob(promptRes.generation_job_id);
-          if (job.status === 'pending_review' && job.proposed_changes_json) {
+          const changes = parseProposedChanges(job.proposed_changes_json);
+          if (job.status === 'pending_review' && changes.length > 0) {
             setPendingJob(job);
-            const changes = JSON.parse(job.proposed_changes_json) as ProposedChange[];
             setProposedChanges(changes);
-            if (changes.length > 0) {
-              setSelectedProposedFile(changes[0]);
-            }
-          } else {
+            setSelectedProposedFile(changes[0]);
+          } else if (pendingJob?.id === job.id) {
             setPendingJob(null);
             setProposedChanges([]);
+            setSelectedProposedFile(null);
           }
-        } catch (jobErr) {
-          console.error('Failed to load generation job details:', jobErr);
+        } catch (jobErr: any) {
+          setErrorMessage(jobErr.message || 'Failed to load generation job details');
         }
       }
 
@@ -344,6 +358,7 @@ export const WorkspacePage: React.FC = () => {
     } catch (err: any) {
       const errMsg = err.message || 'Prompt submission failed';
       setErrorMessage(errMsg);
+      setPromptInput((prev) => prev || userText);
 
       setLogs((prev) => [
         ...prev,
@@ -362,17 +377,39 @@ export const WorkspacePage: React.FC = () => {
 
   // Handle Human Approval of AI Changes
   const handleApproveChanges = async () => {
-    if (!pendingJob || !activeProject) return;
+    if (!pendingJob || !activeProject || isApproving || isRejecting) return;
+
+    const jobToApprove = pendingJob;
+    const changesToApprove = [...proposedChanges];
 
     setIsApproving(true);
+    setErrorMessage(null);
     try {
-      const updatedJob = await jobsApi.approveGenerationJob(pendingJob.id);
+      const outcome = await executeApprovalAction({
+        job: jobToApprove,
+        proposedChanges: changesToApprove,
+        projectId: activeProject.id,
+        previousSelectedFile: selectedFile,
+        approveJob: jobsApi.approveGenerationJob,
+        fetchFiles: fetchProjectFiles,
+      });
+
       setPendingJob(null);
       setProposedChanges([]);
       setSelectedProposedFile(null);
+      setSelectedFile(outcome.nextSelectedFile);
 
-      // Refresh project files to show applied changes
-      await fetchProjectFiles(activeProject.id);
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `approved-${outcome.updatedJob.id}`,
+          sender: 'system',
+          content: outcome.confirmationText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          status: 'delivered',
+          metadata: { filesModified: outcome.approvedPaths },
+        },
+      ]);
 
       setLogs((prev) => [
         ...prev,
@@ -381,7 +418,7 @@ export const WorkspacePage: React.FC = () => {
           timestamp: new Date().toLocaleTimeString(),
           level: 'success',
           source: 'agent',
-          message: `Human approval confirmed. AI changes from job #${updatedJob.id.slice(0, 8)} applied to project files.`,
+          message: `Human approval confirmed. AI changes from job #${outcome.updatedJob.id.slice(0, 8)} applied to project files.`,
         },
       ]);
 
@@ -393,6 +430,11 @@ export const WorkspacePage: React.FC = () => {
     } catch (err: any) {
       const msg = err.message || 'Failed to approve changes';
       setErrorMessage(msg);
+      if (err?.status === 400 && /already been (approved|rejected)/i.test(msg)) {
+        setPendingJob(null);
+        setProposedChanges([]);
+        setSelectedProposedFile(null);
+      }
       setLogs((prev) => [
         ...prev,
         {
@@ -410,14 +452,30 @@ export const WorkspacePage: React.FC = () => {
 
   // Handle Human Rejection of AI Changes
   const handleRejectChanges = async () => {
-    if (!pendingJob || !activeProject) return;
+    if (!pendingJob || !activeProject || isApproving || isRejecting) return;
 
+    const jobToReject = pendingJob;
     setIsRejecting(true);
+    setErrorMessage(null);
     try {
-      const updatedJob = await jobsApi.rejectGenerationJob(pendingJob.id);
+      const { updatedJob, confirmationText } = await executeRejectionAction({
+        job: jobToReject,
+        rejectJob: jobsApi.rejectGenerationJob,
+      });
       setPendingJob(null);
       setProposedChanges([]);
       setSelectedProposedFile(null);
+
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: `rejected-${updatedJob.id}`,
+          sender: 'system',
+          content: confirmationText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          status: 'delivered',
+        },
+      ]);
 
       setLogs((prev) => [
         ...prev,
@@ -438,6 +496,11 @@ export const WorkspacePage: React.FC = () => {
     } catch (err: any) {
       const msg = err.message || 'Failed to reject changes';
       setErrorMessage(msg);
+      if (err?.status === 400 && /already been (approved|rejected)/i.test(msg)) {
+        setPendingJob(null);
+        setProposedChanges([]);
+        setSelectedProposedFile(null);
+      }
       setLogs((prev) => [
         ...prev,
         {
@@ -551,17 +614,34 @@ export const WorkspacePage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          {health?.ai_provider === 'none' ? (
-            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-amber-400 bg-amber-400/10 px-2 py-0.5 rounded border border-amber-400/20">
-              <AlertTriangle className="w-3 h-3" /> AI Provider: none (clean)
-            </span>
-          ) : (
-            <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-mono text-cyan-400 bg-cyan-400/10 px-2 py-0.5 rounded border border-cyan-400/20">
-              <Cpu className="w-3 h-3" /> AI: {health?.ai_provider}
-            </span>
-          )}
-          <span className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded border border-emerald-400/20">
-            <ShieldCheck className="w-3 h-3" /> Human Gate: Required
+          <span
+            className={`hidden sm:inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+              aiStatus.state === 'gemini'
+                ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20'
+                : aiStatus.state === 'unavailable'
+                ? 'text-rose-400 bg-rose-400/10 border-rose-400/20'
+                : aiStatus.state === 'none'
+                ? 'text-amber-400 bg-amber-400/10 border-amber-400/20'
+                : 'text-cyan-400 bg-cyan-400/10 border-cyan-400/20'
+            }`}
+          >
+            {aiStatus.state === 'none' || aiStatus.state === 'unavailable' ? (
+              <AlertTriangle className="w-3 h-3" />
+            ) : (
+              <Cpu className="w-3 h-3" />
+            )}
+            AI Provider: {aiStatus.badgeLabel}
+          </span>
+          <span
+            className={`inline-flex items-center gap-1 text-[11px] font-mono px-2 py-0.5 rounded border ${
+              approvalStatus.state === 'required'
+                ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20'
+                : approvalStatus.state === 'unavailable'
+                ? 'text-rose-400 bg-rose-400/10 border-rose-400/20'
+                : 'text-amber-400 bg-amber-400/10 border-amber-400/20'
+            }`}
+          >
+            <ShieldCheck className="w-3 h-3" /> Human Gate: {approvalStatus.badgeLabel}
           </span>
         </div>
       </div>

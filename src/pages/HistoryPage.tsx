@@ -4,6 +4,7 @@ import { Badge } from '../components/common/Badge';
 import { useProjects } from '../hooks/useProjects';
 import { historyApi } from '../services/api';
 import { ActivityHistoryRecord } from '../types';
+import { filterActivityHistory } from '../utils/aiWorkflow';
 
 export const HistoryPage: React.FC = () => {
   const { activeProject, projects, setActiveProjectId } = useProjects();
@@ -40,9 +41,7 @@ export const HistoryPage: React.FC = () => {
     };
   }, [activeProject?.id]);
 
-  const filtered = historyItems.filter((item) => {
-    return filterType === 'all' || item.action_type === filterType;
-  });
+  const filtered = filterActivityHistory(historyItems, filterType);
 
   const getBadgeVariant = (action: string) => {
     switch (action) {
@@ -56,6 +55,12 @@ export const HistoryPage: React.FC = () => {
         return 'error';
       case 'prompt_submitted':
         return 'brand';
+      case 'ai_proposal_generated':
+        return 'cyan';
+      case 'ai_proposal_approved':
+        return 'success';
+      case 'ai_proposal_rejected':
+        return 'warning';
       default:
         return 'neutral';
     }
@@ -102,6 +107,9 @@ export const HistoryPage: React.FC = () => {
               <option value="file_created">File Created</option>
               <option value="file_updated">File Updated</option>
               <option value="prompt_submitted">Prompt Submitted</option>
+              <option value="ai_proposal_generated">AI Proposal Generated</option>
+              <option value="ai_proposal_approved">AI Proposal Approved</option>
+              <option value="ai_proposal_rejected">AI Proposal Rejected</option>
             </select>
           </div>
         </div>

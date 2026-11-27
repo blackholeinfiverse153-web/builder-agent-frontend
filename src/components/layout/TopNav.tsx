@@ -3,6 +3,7 @@ import { Menu, Activity, ShieldAlert, Cpu, LogOut, User as UserIcon } from 'luci
 import { HealthData } from '../../types';
 import { StatusIndicator } from '../common/StatusIndicator';
 import { useAuth } from '../../context/AuthContext';
+import { getAiProviderStatus, getApprovalPolicyStatus } from '../../utils/aiWorkflow';
 
 interface TopNavProps {
   pageTitle: string;
@@ -21,6 +22,8 @@ export const TopNav: React.FC<TopNavProps> = ({
 }) => {
   const { user, logout } = useAuth();
   const isConnected = !healthLoading && !healthError && health !== null;
+  const aiStatus = getAiProviderStatus(health, healthLoading, healthError);
+  const approvalStatus = getApprovalPolicyStatus(health, healthLoading, healthError);
 
   return (
     <header className="h-14 border-b border-surface-800 bg-surface-950/80 backdrop-blur-md px-4 lg:px-6 flex items-center justify-between sticky top-0 z-30">
@@ -52,13 +55,13 @@ export const TopNav: React.FC<TopNavProps> = ({
         <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-surface-900 border border-surface-800 text-xs font-mono">
           <Cpu className="w-3.5 h-3.5 text-cyan-400" />
           <span className="text-surface-400">AI:</span>
-          <span className="text-amber-400 font-semibold">{health?.ai_provider || 'none'}</span>
+          <span className={aiStatus.navTextClass}>{aiStatus.badgeLabel}</span>
         </div>
 
         {/* Sandbox Approval Policy Pill */}
-        <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-surface-900 border border-surface-800 text-xs font-mono text-emerald-400">
+        <div className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-surface-900 border border-surface-800 text-xs font-mono ${approvalStatus.textClass}`}>
           <ShieldAlert className="w-3.5 h-3.5" />
-          <span>Approval: Strict</span>
+          <span>{approvalStatus.navLabel}</span>
         </div>
 
         {/* Authenticated User Menu & Logout */}

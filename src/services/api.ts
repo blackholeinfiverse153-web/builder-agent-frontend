@@ -100,6 +100,50 @@ export class ApiError extends Error {
   }
 }
 
+function formatValidationDetail(detail: unknown): string | null {
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail.trim();
+  }
+  if (Array.isArray(detail) && detail.length > 0) {
+    const parts = detail.map((entry: any) => {
+      if (typeof entry === 'string') return entry;
+      const loc = Array.isArray(entry?.loc)
+        ? entry.loc.filter((part: unknown) => part !== 'body').join('.')
+        : '';
+      const msg = entry?.msg || JSON.stringify(entry);
+      return loc ? `${loc}: ${msg}` : msg;
+    });
+    return parts.join(', ');
+  }
+  return null;
+}
+
+export function formatHttpErrorMessage(
+  status: number,
+  statusText: string,
+  responseData: any
+): string {
+  const detailMsg = formatValidationDetail(responseData?.detail);
+  if (detailMsg) {
+    return detailMsg;
+  }
+
+  switch (status) {
+    case 400:
+      return 'Bad request: invalid input or job state.';
+    case 403:
+      return 'Access forbidden: you do not own this project or resource.';
+    case 409:
+      return 'Conflict: an active job is already running or target path conflicts with a folder.';
+    case 422:
+      return 'Validation error: submitted data failed backend schema checks.';
+    case 429:
+      return 'Rate limit exceeded: please wait before submitting another prompt.';
+    default:
+      return `HTTP Error ${status}: ${statusText || 'Request failed'}`;
+  }
+}
+
 interface RequestOptions extends RequestInit {
   skipAuth?: boolean;
 }
@@ -148,14 +192,7 @@ async function apiRequest<T>(endpoint: string, options: RequestOptions = {}): Pr
   }
 
   if (!response.ok) {
-    let errorMsg = `HTTP Error ${response.status}: ${response.statusText}`;
-    if (responseData && responseData.detail) {
-      if (typeof responseData.detail === 'string') {
-        errorMsg = responseData.detail;
-      } else if (Array.isArray(responseData.detail)) {
-        errorMsg = responseData.detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ');
-      }
-    }
+    const errorMsg = formatHttpErrorMessage(response.status, response.statusText, responseData);
     throw new ApiError(response.status, errorMsg, responseData);
   }
 

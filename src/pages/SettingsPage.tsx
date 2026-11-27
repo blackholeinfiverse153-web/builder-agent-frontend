@@ -5,12 +5,15 @@ import { Button } from '../components/common/Button';
 import { Badge } from '../components/common/Badge';
 import { useHealth } from '../hooks/useHealth';
 import { getApiBaseUrl, setApiBaseUrl } from '../services/api';
+import { getAiProviderStatus, getApprovalPolicyStatus } from '../utils/aiWorkflow';
 
 export const SettingsPage: React.FC = () => {
   const { health, loading: healthLoading, error: healthError, refetch } = useHealth();
   const [apiUrl, setApiUrl] = useState(getApiBaseUrl());
   const [testingConnection, setTestingConnection] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const aiStatus = getAiProviderStatus(health, healthLoading, healthError);
+  const approvalStatus = getApprovalPolicyStatus(health, healthLoading, healthError);
 
   const handleSaveApiUrl = async () => {
     const trimmed = apiUrl.trim();
@@ -133,10 +136,10 @@ export const SettingsPage: React.FC = () => {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs text-surface-300">Active AI Adapter:</span>
-            <Badge variant="warning">{health?.ai_provider || 'none (clean)'}</Badge>
+            <Badge variant={aiStatus.badgeVariant}>{aiStatus.badgeLabel}</Badge>
           </div>
           <p className="text-xs text-surface-400 leading-relaxed">
-            Initial platform initialization uses provider <code>none</code> to prevent charges, unnecessary downloads, or fake generation. When ready to integrate an AI provider (e.g., Anthropic, OpenAI, or Google Gemini), add the provider key to the backend <code>.env</code> file.
+            {aiStatus.description}
           </p>
         </div>
       </Card>
@@ -150,7 +153,9 @@ export const SettingsPage: React.FC = () => {
         <div className="space-y-3 text-xs font-mono">
           <div className="flex items-center justify-between py-1 border-b border-surface-800/60">
             <span className="text-surface-400">Require Human Approval:</span>
-            <span className="text-emerald-400 font-semibold">Enforced (True)</span>
+            <span className={`font-semibold ${approvalStatus.textClass}`}>
+              {approvalStatus.settingsValue}
+            </span>
           </div>
           <div className="flex items-center justify-between py-1 border-b border-surface-800/60">
             <span className="text-surface-400">Container Execution Timeout:</span>
