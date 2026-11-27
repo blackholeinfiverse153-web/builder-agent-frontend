@@ -23,7 +23,7 @@ import { getAiProviderStatus, getApprovalPolicyStatus } from '../utils/aiWorkflo
 
 export const DashboardPage: React.FC = () => {
   const { health, loading: healthLoading, error: healthError } = useHealth();
-  const { projects, loading: projectsLoading } = useProjects();
+  const { projects, setActiveProjectId, loading: projectsLoading } = useProjects();
 
   const isConnected = !healthLoading && !healthError && health !== null;
   const aiStatus = getAiProviderStatus(health, healthLoading, healthError);
@@ -208,7 +208,7 @@ export const DashboardPage: React.FC = () => {
                     <span className="text-[11px] font-mono text-surface-500">
                       ID: {project.id.slice(0, 8)}...
                     </span>
-                    <Link to="/workspace">
+                    <Link to="/workspace" onClick={() => setActiveProjectId(project.id)}>
                       <span className="text-brand-400 hover:text-brand-300 font-medium text-xs flex items-center gap-1">
                         Open Workspace <ArrowRight className="w-3 h-3" />
                       </span>

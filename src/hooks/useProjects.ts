@@ -6,23 +6,26 @@ import { useAuth } from '../context/AuthContext';
 export function useProjects() {
   const { user } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
+  const [activeProjectIdState, setActiveProjectIdState] = useState<string | null>(() => {
     return sessionStorage.getItem('bhiv_active_project_id');
   });
+  const activeProjectId = activeProjectIdState;
+
+  // Persist active project synchronously so cross-page <Link> navigation never reads stale storage
+  const setActiveProjectId = useCallback((projectId: string | null) => {
+    if (projectId) {
+      sessionStorage.setItem('bhiv_active_project_id', projectId);
+    } else {
+      sessionStorage.removeItem('bhiv_active_project_id');
+    }
+    setActiveProjectIdState(projectId);
+  }, []);
+
   const [projectFiles, setProjectFiles] = useState<Record<string, ProjectFile[]>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [filesLoading, setFilesLoading] = useState<boolean>(false);
   const [filesError, setFilesError] = useState<string | null>(null);
-
-  // Sync active project id to sessionStorage
-  useEffect(() => {
-    if (activeProjectId) {
-      sessionStorage.setItem('bhiv_active_project_id', activeProjectId);
-    } else {
-      sessionStorage.removeItem('bhiv_active_project_id');
-    }
-  }, [activeProjectId]);
 
   // Fetch all projects for authenticated user
   const fetchProjects = useCallback(async () => {

@@ -114,9 +114,10 @@ export const EditorPage: React.FC = () => {
     const fileName = window.prompt('Enter file name (e.g. index.ts, utils.py):');
     if (!fileName || !fileName.trim()) return;
 
-    const trimmed = fileName.trim();
+    const trimmed = fileName.trim().replace(/\\/g, '/');
     const filePath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-    const ext = trimmed.split('.').pop() || '';
+    const fileNameOnly = filePath.split('/').pop() || trimmed;
+    const ext = fileNameOnly.split('.').pop() || '';
     const langMap: Record<string, string> = {
       py: 'python',
       ts: 'typescript',
@@ -130,9 +131,9 @@ export const EditorPage: React.FC = () => {
     try {
       setErrorMessage(null);
       const newFile = await addFile(activeProject.id, {
-        name: trimmed,
+        name: fileNameOnly,
         path: filePath,
-        content: `# ${trimmed}\n\n`,
+        content: `# ${fileNameOnly}\n\n`,
         language: langMap[ext] || 'plaintext',
         is_folder: false,
       });

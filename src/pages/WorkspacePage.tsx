@@ -553,9 +553,10 @@ export const WorkspacePage: React.FC = () => {
     const fileName = window.prompt('Enter file name (e.g., main.py, app.ts):');
     if (!fileName || !fileName.trim()) return;
 
-    const trimmed = fileName.trim();
+    const trimmed = fileName.trim().replace(/\\/g, '/');
     const filePath = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-    const ext = trimmed.split('.').pop() || '';
+    const fileNameOnly = filePath.split('/').pop() || trimmed;
+    const ext = fileNameOnly.split('.').pop() || '';
     const langMap: Record<string, string> = {
       py: 'python',
       ts: 'typescript',
@@ -568,12 +569,13 @@ export const WorkspacePage: React.FC = () => {
 
     try {
       const created = await addFile(activeProject.id, {
-        name: trimmed,
+        name: fileNameOnly,
         path: filePath,
-        content: `# ${trimmed}\n`,
+        content: `# ${fileNameOnly}\n`,
         language: langMap[ext] || 'plaintext',
         is_folder: false,
       });
+      setSelectedProposedFile(null);
       setSelectedFile(created);
       setErrorMessage(null);
       setLogs((prev) => [
