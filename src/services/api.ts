@@ -34,18 +34,33 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
 export function getApiBaseUrl(): string {
   if (memoryApiUrl) return memoryApiUrl;
   if (typeof window !== 'undefined') {
-    const saved = window.localStorage?.getItem('BHIV_API_URL');
-    if (saved) return saved;
+    const saved = window.localStorage?.getItem('BHIV_API_URL')?.trim();
+    if (saved) return saved.replace(/\/+$/, '');
+  }
+  const envUrl = import.meta.env?.VITE_API_BASE_URL?.trim();
+  if (envUrl) {
+    return envUrl.replace(/\/+$/, '');
+  }
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
     const host = window.location.hostname || 'localhost';
-    return `http://${host}:8000/api/v1`;
+    return `${protocol}//${host}:8000/api/v1`;
   }
   return DEFAULT_API_BASE_URL;
 }
 
 export function setApiBaseUrl(url: string): void {
-  memoryApiUrl = url.trim();
+  const normalized = url.trim().replace(/\/+$/, '');
+  if (!normalized) {
+    memoryApiUrl = null;
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem('BHIV_API_URL');
+    }
+    return;
+  }
+  memoryApiUrl = normalized;
   if (typeof window !== 'undefined' && window.localStorage) {
-    window.localStorage.setItem('BHIV_API_URL', url.trim());
+    window.localStorage.setItem('BHIV_API_URL', normalized);
   }
 }
 

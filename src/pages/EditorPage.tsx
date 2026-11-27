@@ -9,6 +9,8 @@ import {
   Plus,
   Trash2,
   Loader2,
+  AlertCircle,
+  X,
 } from 'lucide-react';
 import { useProjects } from '../hooks/useProjects';
 import { ProjectFile } from '../types';
@@ -24,6 +26,8 @@ export const EditorPage: React.FC = () => {
     addFile,
     deleteFile,
     loading: projectsLoading,
+    filesLoading,
+    filesError,
   } = useProjects();
 
   // Active open file state
@@ -32,6 +36,7 @@ export const EditorPage: React.FC = () => {
   const [isDirty, setIsDirty] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [savedMessage, setSavedMessage] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Initialize with the first file or maintain active file
   useEffect(() => {
@@ -74,6 +79,7 @@ export const EditorPage: React.FC = () => {
     if (!activeFile || !activeProject || isSaving) return;
 
     setIsSaving(true);
+    setErrorMessage(null);
     try {
       const updated = await updateFile(activeProject.id, activeFile.id, {
         content: fileContent,
@@ -83,7 +89,7 @@ export const EditorPage: React.FC = () => {
       setSavedMessage(true);
       setTimeout(() => setSavedMessage(false), 2500);
     } catch (err: any) {
-      alert(err.message || 'Failed to save file to backend');
+      setErrorMessage(err.message || 'Failed to save file to backend');
     } finally {
       setIsSaving(false);
     }
@@ -122,6 +128,7 @@ export const EditorPage: React.FC = () => {
     };
 
     try {
+      setErrorMessage(null);
       const newFile = await addFile(activeProject.id, {
         name: trimmed,
         path: filePath,
@@ -133,7 +140,7 @@ export const EditorPage: React.FC = () => {
       setFileContent(newFile.content);
       setIsDirty(false);
     } catch (err: any) {
-      alert(err.message || 'Failed to create file');
+      setErrorMessage(err.message || 'Failed to create file');
     }
   };
 
@@ -142,17 +149,32 @@ export const EditorPage: React.FC = () => {
     if (!window.confirm(`Delete file '${filePath}' permanently?`)) return;
 
     try {
+      setErrorMessage(null);
       await deleteFile(activeProject.id, fileId);
       if (activeFile?.id === fileId) {
         setActiveFile(null);
       }
     } catch (err: any) {
-      alert(err.message || 'Failed to delete file');
+      setErrorMessage(err.message || 'Failed to delete file');
     }
   };
 
   return (
     <div className="h-[calc(100vh-5rem)] flex flex-col gap-3">
+      {(errorMessage || filesError) && (
+        <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+          <span className="flex-1">{errorMessage || filesError}</span>
+          {errorMessage && (
+            <button
+              onClick={() => setErrorMessage(null)}
+              className="text-surface-500 hover:text-white"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      )}
       {/* Editor Top Control Bar */}
       <div className="flex items-center justify-between px-4 py-2 bg-surface-900/60 border border-surface-800 rounded-lg text-xs">
         <div className="flex items-center gap-3">
@@ -218,7 +240,7 @@ export const EditorPage: React.FC = () => {
             </div>
           </div>
           <div className="flex-1 p-2 overflow-y-auto space-y-1">
-            {projectsLoading ? (
+            {projectsLoading || filesLoading ? (
               <div className="p-4 text-center text-surface-500 font-mono text-xs flex items-center justify-center gap-2">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading files...
               </div>

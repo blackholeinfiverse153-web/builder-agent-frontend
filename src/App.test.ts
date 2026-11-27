@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   getApiBaseUrl,
   setApiBaseUrl,
@@ -8,20 +8,36 @@ import {
   ApiError,
   jobsApi,
 } from './services/api';
-import { ProposedChange, GenerationJobItem } from './types';
+import { Project, ProposedChange, GenerationJobItem } from './types';
 
 describe('BHIV Frontend Platform Test Suite', () => {
   beforeEach(() => {
     clearAuthToken();
+    setApiBaseUrl('');
     if (typeof window !== 'undefined' && window.localStorage) {
       window.localStorage.removeItem('BHIV_API_URL');
     }
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   describe('API Configuration & Token Storage Service', () => {
     it('returns default API base URL when no override is set', () => {
       const url = getApiBaseUrl();
       expect(url).toContain('8000/api/v1');
+    });
+
+    it('uses VITE_API_BASE_URL when set and no localStorage override exists', () => {
+      vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com/api/v1/');
+      expect(getApiBaseUrl()).toBe('https://api.example.com/api/v1');
+    });
+
+    it('prioritizes explicit localStorage override over VITE_API_BASE_URL', () => {
+      vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.com/api/v1');
+      setApiBaseUrl('http://127.0.0.1:8000/api/v1/');
+      expect(getApiBaseUrl()).toBe('http://127.0.0.1:8000/api/v1');
     });
 
     it('sets and retrieves custom API base URL', () => {
@@ -159,6 +175,29 @@ describe('BHIV Frontend Platform Test Suite', () => {
       const changes = JSON.parse(job.proposed_changes_json || '[]') as ProposedChange[];
       expect(changes).toHaveLength(1);
       expect(changes[0].path).toBe('/app.py');
+    });
+
+    it('safely handles nullable project descriptions in search filtering', () => {
+      const projects: Project[] = [
+        {
+          id: 'p1',
+          user_id: 'u1',
+          name: 'alpha-api',
+          description: null,
+          language: 'python',
+          framework: 'fastapi',
+          status: 'idle',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ];
+      const query = 'alpha';
+      const filtered = projects.filter(
+        (p) =>
+          p.name.toLowerCase().includes(query) ||
+          (p.description || '').toLowerCase().includes(query)
+      );
+      expect(filtered).toHaveLength(1);
     });
   });
 });

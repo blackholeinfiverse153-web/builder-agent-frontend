@@ -23,16 +23,18 @@ export const ProjectsPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedLanguage, setSelectedLanguage] = useState<string>('all');
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const handleDelete = async (id: string) => {
     if (!window.confirm('Are you sure you want to delete this project and all its files?')) {
       return;
     }
     setDeletingId(id);
+    setActionError(null);
     try {
       await deleteProject(id);
     } catch (err: any) {
-      alert(err.message || 'Failed to delete project');
+      setActionError(err.message || 'Failed to delete project');
     } finally {
       setDeletingId(null);
     }
@@ -41,7 +43,7 @@ export const ProjectsPage: React.FC = () => {
   const filteredProjects = projects.filter((project) => {
     const matchesSearch =
       project.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      project.description.toLowerCase().includes(searchQuery.toLowerCase());
+      (project.description || '').toLowerCase().includes(searchQuery.toLowerCase());
     const matchesLanguage =
       selectedLanguage === 'all' || project.language === selectedLanguage;
     return matchesSearch && matchesLanguage;
@@ -68,10 +70,10 @@ export const ProjectsPage: React.FC = () => {
       </div>
 
       {/* Filter and Search Bar */}
-      {error && (
+      {(error || actionError) && (
         <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-center gap-2">
           <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-          <span>{error}</span>
+          <span>{actionError || error}</span>
         </div>
       )}
 

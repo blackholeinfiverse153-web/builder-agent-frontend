@@ -12,6 +12,8 @@ export function useProjects() {
   const [projectFiles, setProjectFiles] = useState<Record<string, ProjectFile[]>>({});
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [filesLoading, setFilesLoading] = useState<boolean>(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
 
   // Sync active project id to sessionStorage
   useEffect(() => {
@@ -26,6 +28,8 @@ export function useProjects() {
   const fetchProjects = useCallback(async () => {
     if (!user) {
       setProjects([]);
+      setProjectFiles({});
+      setFilesError(null);
       setLoading(false);
       return;
     }
@@ -57,13 +61,19 @@ export function useProjects() {
 
   // Fetch files for a specific project
   const fetchProjectFiles = useCallback(async (projectId: string): Promise<ProjectFile[]> => {
+    setFilesLoading(true);
+    setFilesError(null);
     try {
       const files = await filesApi.list(projectId);
       setProjectFiles((prev) => ({ ...prev, [projectId]: files }));
       return files;
     } catch (err: any) {
+      const msg = err.message || 'Failed to load project files';
+      setFilesError(msg);
       console.error('Failed to load project files:', err);
       return [];
+    } finally {
+      setFilesLoading(false);
     }
   }, []);
 
@@ -71,6 +81,8 @@ export function useProjects() {
   useEffect(() => {
     if (activeProjectId && user && projects.some((p) => p.id === activeProjectId)) {
       fetchProjectFiles(activeProjectId);
+    } else if (!activeProjectId) {
+      setFilesError(null);
     }
   }, [activeProjectId, user, projects, fetchProjectFiles]);
 
@@ -147,6 +159,8 @@ export function useProjects() {
     currentFiles,
     loading,
     error,
+    filesLoading,
+    filesError,
     setActiveProjectId,
     refetchProjects: fetchProjects,
     fetchProjectFiles,

@@ -7,18 +7,35 @@ import { useHealth } from '../hooks/useHealth';
 import { getApiBaseUrl, setApiBaseUrl } from '../services/api';
 
 export const SettingsPage: React.FC = () => {
-  const { health, refetch } = useHealth();
+  const { health, loading: healthLoading, error: healthError, refetch } = useHealth();
   const [apiUrl, setApiUrl] = useState(getApiBaseUrl());
-  const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const handleSaveApiUrl = async () => {
-    setApiBaseUrl(apiUrl);
-    setTestStatus('Testing connection...');
-    try {
-      await refetch();
-      setTestStatus('Connected successfully!');
-    } catch {
-      setTestStatus('Failed to connect to API endpoint.');
+    const trimmed = apiUrl.trim();
+    if (!trimmed) {
+      setTestResult({ ok: false, message: 'Please enter a valid API Base URL.' });
+      return;
+    }
+
+    setApiBaseUrl(trimmed);
+    setTestingConnection(true);
+    setTestResult(null);
+
+    const result = await refetch();
+    setTestingConnection(false);
+
+    if (result.ok && result.data) {
+      setTestResult({
+        ok: true,
+        message: `Connected successfully to ${result.data.environment} v${result.data.version}.`,
+      });
+    } else {
+      setTestResult({
+        ok: false,
+        message: result.error || 'Failed to connect to API endpoint.',
+      });
     }
   };
 
@@ -57,22 +74,44 @@ export const SettingsPage: React.FC = () => {
               <Button
                 variant="primary"
                 size="md"
+                loading={testingConnection}
                 onClick={handleSaveApiUrl}
                 icon={<Save className="w-4 h-4" />}
               >
-                Save & Test
+                {testingConnection ? 'Testing...' : 'Save & Test'}
               </Button>
             </div>
-            {testStatus && (
-              <p className="text-xs font-mono text-surface-400 mt-2">{testStatus}</p>
+            {testResult && (
+              <p
+                className={`text-xs font-mono mt-2 ${
+                  testResult.ok ? 'text-emerald-400' : 'text-rose-400'
+                }`}
+              >
+                {testResult.message}
+              </p>
             )}
           </div>
 
           <div className="p-3 rounded-lg bg-surface-950/60 border border-surface-800 text-xs font-mono space-y-1">
             <div className="flex justify-between">
               <span className="text-surface-500">Service Status:</span>
-              <span className="text-emerald-400">{health?.status || 'Offline'}</span>
+              <span
+                className={
+                  health
+                    ? 'text-emerald-400'
+                    : healthLoading
+                    ? 'text-amber-400'
+                    : 'text-rose-400'
+                }
+              >
+                {health?.status || (healthLoading ? 'Checking...' : 'Offline')}
+              </span>
             </div>
+            {healthError && (
+              <div className="text-[11px] text-rose-400 pt-1 break-all">
+                Error: {healthError}
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-surface-500">Python Version:</span>
               <span className="text-surface-300">{health?.python_version || 'Unknown'}</span>

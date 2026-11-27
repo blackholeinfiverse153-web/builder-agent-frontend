@@ -31,7 +31,7 @@ export interface Project {
   id: string;
   user_id: string;
   name: string;
-  description: string;
+  description?: string | null;
   language: SupportedLanguage;
   framework: SupportedFramework;
   status: 'active' | 'archived' | 'generating' | 'idle';

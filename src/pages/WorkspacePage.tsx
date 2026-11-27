@@ -14,6 +14,7 @@ import {
   FileDiff,
   ShieldCheck,
   Cpu,
+  Loader2,
 } from 'lucide-react';
 import { useProjects } from '../hooks/useProjects';
 import { useHealth } from '../hooks/useHealth';
@@ -37,6 +38,9 @@ export const WorkspacePage: React.FC = () => {
     projects,
     setActiveProjectId,
     currentFiles,
+    filesLoading,
+    filesError,
+    error: projectsError,
     addFile,
     deleteFile,
     fetchProjectFiles,
@@ -60,6 +64,8 @@ export const WorkspacePage: React.FC = () => {
   // Prompt chat state
   const [promptInput, setPromptInput] = useState('');
   const [isSubmittingPrompt, setIsSubmittingPrompt] = useState(false);
+  const [isLoadingPrompts, setIsLoadingPrompts] = useState(false);
+  const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Active Pending AI Generation Job & Proposed Changes
@@ -78,31 +84,56 @@ export const WorkspacePage: React.FC = () => {
     },
   ]);
 
-  // Load existing prompts for active project from backend
+  // Reset and load existing prompts for active project from backend
   useEffect(() => {
-    if (!activeProject) return;
+    let cancelled = false;
+
+    setSelectedFile(null);
+    setPendingJob(null);
+    setProposedChanges([]);
+    setSelectedProposedFile(null);
+    setErrorMessage(null);
+
+    if (!activeProject) {
+      setIsLoadingPrompts(false);
+      setChatMessages([
+        {
+          id: 'msg-empty',
+          sender: 'system',
+          content: 'No active project selected. Select or create a project to begin.',
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+      return;
+    }
+
+    const defaultMsgs: ChatMessage[] = [
+      {
+        id: `msg-init-${activeProject.id}`,
+        sender: 'system',
+        content: `Project '${activeProject.name}' loaded from SQLite backend database.`,
+        timestamp: new Date(activeProject.created_at || Date.now()).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      },
+    ];
+    setChatMessages(defaultMsgs);
+    setIsLoadingPrompts(true);
 
     promptsApi
       .list(activeProject.id)
       .then(async (existingPrompts) => {
+        if (cancelled) return;
         if (existingPrompts && existingPrompts.length > 0) {
-          const msgs: ChatMessage[] = [
-            {
-              id: 'msg-init',
-              sender: 'system',
-              content: `Project '${activeProject.name}' loaded from SQLite backend database.`,
-              timestamp: new Date(activeProject.created_at || Date.now()).toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-              }),
-            },
-          ];
+          const msgs: ChatMessage[] = [...defaultMsgs];
 
           // Check if there is a pending job on the latest prompt
           const latestPrompt = existingPrompts[0];
           if (latestPrompt && latestPrompt.generation_job_id) {
             try {
               const job = await jobsApi.getGenerationJob(latestPrompt.generation_job_id);
+              if (cancelled) return;
               if (job.status === 'pending_review' && job.proposed_changes_json) {
                 setPendingJob(job);
                 const changes = JSON.parse(job.proposed_changes_json) as ProposedChange[];
@@ -111,8 +142,10 @@ export const WorkspacePage: React.FC = () => {
                   setSelectedProposedFile(changes[0]);
                 }
               }
-            } catch {
-              // ignore
+            } catch (jobErr: any) {
+              if (!cancelled) {
+                setErrorMessage(jobErr.message || 'Failed to load pending generation job');
+              }
             }
           }
 
@@ -147,9 +180,28 @@ export const WorkspacePage: React.FC = () => {
           setChatMessages(msgs);
         }
       })
-      .catch((err) => {
-        console.error('Failed to load prompts for project:', err);
+      .catch((err: any) => {
+        if (cancelled) return;
+        const msg = err.message || 'Failed to load prompts for project';
+        setErrorMessage(msg);
+        setLogs((prev) => [
+          ...prev,
+          {
+            id: `log-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            level: 'error',
+            source: 'system',
+            message: msg,
+          },
+        ]);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingPrompts(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeProject?.id]);
 
   // Bottom panel tab state
@@ -169,17 +221,42 @@ export const WorkspacePage: React.FC = () => {
   const [auditHistory, setAuditHistory] = useState<ActivityHistoryRecord[]>([]);
 
   useEffect(() => {
-    if (!activeProject) return;
+    let cancelled = false;
+    setTestResults([]);
+    setAuditHistory([]);
 
-    testingApi
-      .getResults(activeProject.id)
-      .then((data) => setTestResults(data))
-      .catch((err) => console.error('Failed to load test results:', err));
+    if (!activeProject) {
+      setIsLoadingMetadata(false);
+      return;
+    }
 
-    historyApi
-      .list(activeProject.id)
-      .then((data) => setAuditHistory(data))
-      .catch((err) => console.error('Failed to load audit history:', err));
+    setIsLoadingMetadata(true);
+    Promise.allSettled([
+      testingApi.getResults(activeProject.id),
+      historyApi.list(activeProject.id),
+    ])
+      .then(([testsRes, historyRes]) => {
+        if (cancelled) return;
+        if (testsRes.status === 'fulfilled') {
+          setTestResults(testsRes.value);
+        } else {
+          const msg = testsRes.reason?.message || 'Failed to load test results';
+          setErrorMessage((prev) => prev || msg);
+        }
+        if (historyRes.status === 'fulfilled') {
+          setAuditHistory(historyRes.value);
+        } else {
+          const msg = historyRes.reason?.message || 'Failed to load audit history';
+          setErrorMessage((prev) => prev || msg);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingMetadata(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeProject?.id]);
 
   // Handle prompt submission
@@ -314,7 +391,18 @@ export const WorkspacePage: React.FC = () => {
         .then((data) => setAuditHistory(data))
         .catch(() => {});
     } catch (err: any) {
-      alert(err.message || 'Failed to approve changes');
+      const msg = err.message || 'Failed to approve changes';
+      setErrorMessage(msg);
+      setLogs((prev) => [
+        ...prev,
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'error',
+          source: 'system',
+          message: msg,
+        },
+      ]);
     } finally {
       setIsApproving(false);
     }
@@ -348,7 +436,18 @@ export const WorkspacePage: React.FC = () => {
         .then((data) => setAuditHistory(data))
         .catch(() => {});
     } catch (err: any) {
-      alert(err.message || 'Failed to reject changes');
+      const msg = err.message || 'Failed to reject changes';
+      setErrorMessage(msg);
+      setLogs((prev) => [
+        ...prev,
+        {
+          id: `log-${Date.now()}`,
+          timestamp: new Date().toLocaleTimeString(),
+          level: 'error',
+          source: 'system',
+          message: msg,
+        },
+      ]);
     } finally {
       setIsRejecting(false);
     }
@@ -382,6 +481,7 @@ export const WorkspacePage: React.FC = () => {
         is_folder: false,
       });
       setSelectedFile(created);
+      setErrorMessage(null);
       setLogs((prev) => [
         ...prev,
         {
@@ -393,7 +493,7 @@ export const WorkspacePage: React.FC = () => {
         },
       ]);
     } catch (err: any) {
-      alert(err.message || 'Failed to create file');
+      setErrorMessage(err.message || 'Failed to create file');
     }
   };
 
@@ -406,6 +506,7 @@ export const WorkspacePage: React.FC = () => {
       if (selectedFile?.id === fileId) {
         setSelectedFile(null);
       }
+      setErrorMessage(null);
       setLogs((prev) => [
         ...prev,
         {
@@ -417,7 +518,7 @@ export const WorkspacePage: React.FC = () => {
         },
       ]);
     } catch (err: any) {
-      alert(err.message || 'Failed to delete file');
+      setErrorMessage(err.message || 'Failed to delete file');
     }
   };
 
@@ -488,7 +589,14 @@ export const WorkspacePage: React.FC = () => {
             </div>
           </div>
           <div className="flex-1 p-2 overflow-y-auto space-y-0.5">
-            {currentFiles.length > 0 ? (
+            {filesLoading ? (
+              <div className="p-4 flex items-center justify-center gap-2 text-xs font-mono text-surface-400">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-400" />
+                <span>Loading files...</span>
+              </div>
+            ) : filesError ? (
+              <p className="text-xs text-rose-400 p-2 font-mono text-center">{filesError}</p>
+            ) : currentFiles.length > 0 ? (
               currentFiles.map((f) => {
                 const isSelected = selectedFile?.id === f.id && !selectedProposedFile;
                 return (
@@ -534,21 +642,23 @@ export const WorkspacePage: React.FC = () => {
               <Terminal className="w-3.5 h-3.5 text-brand-400" /> Agent Conversation
             </span>
             <span className="text-[10px] font-mono text-surface-500">
-              {isSubmittingPrompt ? 'Generating...' : 'FastAPI Backend'}
+              {isSubmittingPrompt ? 'Generating...' : isLoadingPrompts ? 'Loading...' : 'FastAPI Backend'}
             </span>
           </div>
 
           {/* Error Banner */}
-          {errorMessage && (
+          {(errorMessage || projectsError) && (
             <div className="p-2.5 mx-3 mt-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span className="flex-1">{errorMessage}</span>
-              <button
-                onClick={() => setErrorMessage(null)}
-                className="text-surface-500 hover:text-white"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
+              <span className="flex-1">{errorMessage || projectsError}</span>
+              {errorMessage && (
+                <button
+                  onClick={() => setErrorMessage(null)}
+                  className="text-surface-500 hover:text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           )}
 
@@ -813,7 +923,11 @@ export const WorkspacePage: React.FC = () => {
 
           {bottomTab === 'tests' && (
             <div className="space-y-1 text-[11px]">
-              {testResults.length === 0 ? (
+              {isLoadingMetadata ? (
+                <p className="text-surface-400 text-[11px] flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Loading test results...
+                </p>
+              ) : testResults.length === 0 ? (
                 <p className="text-surface-500 text-[11px]">No test runs recorded for this project in the backend database.</p>
               ) : (
                 testResults.map((r) => (
@@ -828,7 +942,11 @@ export const WorkspacePage: React.FC = () => {
 
           {bottomTab === 'audit' && (
             <div className="text-[11px] text-surface-400 space-y-1">
-              {auditHistory.length === 0 ? (
+              {isLoadingMetadata ? (
+                <p className="text-surface-400 text-[11px] flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Loading audit history...
+                </p>
+              ) : auditHistory.length === 0 ? (
                 <p className="text-surface-500 text-[11px]">No activity history logged yet.</p>
               ) : (
                 auditHistory.map((h) => (

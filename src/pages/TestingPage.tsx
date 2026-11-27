@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CheckSquare, Play, Loader2, CheckCircle2, XCircle, FolderGit2 } from 'lucide-react';
+import { CheckSquare, Play, Loader2, CheckCircle2, XCircle, FolderGit2, AlertCircle } from 'lucide-react';
 import { Card } from '../components/common/Card';
 import { Button } from '../components/common/Button';
 import { useProjects } from '../hooks/useProjects';
@@ -11,31 +11,48 @@ export const TestingPage: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [testResults, setTestResults] = useState<TestResultRecord[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     if (!activeProject) {
       setTestResults([]);
+      setError(null);
+      setLoading(false);
       return;
     }
 
     setLoading(true);
+    setError(null);
     testingApi
       .getResults(activeProject.id)
-      .then((data) => setTestResults(data))
-      .catch((err) => console.error('Failed to load test results:', err))
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) setTestResults(data);
+      })
+      .catch((err: any) => {
+        if (!cancelled) setError(err.message || 'Failed to load test results');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeProject?.id]);
 
-  const handleRunTests = () => {
+  const handleRunTests = async () => {
     if (!activeProject) return;
     setIsRunning(true);
-    setTimeout(() => {
-      testingApi
-        .getResults(activeProject.id)
-        .then((data) => setTestResults(data))
-        .catch(() => {})
-        .finally(() => setIsRunning(false));
-    }, 1000);
+    setError(null);
+    try {
+      const data = await testingApi.getResults(activeProject.id);
+      setTestResults(data);
+    } catch (err: any) {
+      setError(err.message || 'Failed to refresh test results');
+    } finally {
+      setIsRunning(false);
+    }
   };
 
   const totalPassed = testResults.reduce((acc, t) => acc + (t.passed_count || 0), 0);
@@ -82,6 +99,14 @@ export const TestingPage: React.FC = () => {
           </Button>
         </div>
       </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 font-mono flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+          <span>{error}</span>
+        </div>
+      )}
 
       {/* Test Metrics Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { History, Clock, Filter, Loader2, FolderGit2 } from 'lucide-react';
+import { History, Clock, Filter, Loader2, FolderGit2, AlertCircle } from 'lucide-react';
 import { Badge } from '../components/common/Badge';
 import { useProjects } from '../hooks/useProjects';
 import { historyApi } from '../services/api';
@@ -10,19 +10,34 @@ export const HistoryPage: React.FC = () => {
   const [filterType, setFilterType] = useState('all');
   const [historyItems, setHistoryItems] = useState<ActivityHistoryRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     if (!activeProject) {
       setHistoryItems([]);
+      setError(null);
+      setLoading(false);
       return;
     }
 
     setLoading(true);
+    setError(null);
     historyApi
       .list(activeProject.id)
-      .then((data) => setHistoryItems(data))
-      .catch((err) => console.error('Failed to load activity history:', err))
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) setHistoryItems(data);
+      })
+      .catch((err: any) => {
+        if (!cancelled) setError(err.message || 'Failed to load activity history');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeProject?.id]);
 
   const filtered = historyItems.filter((item) => {
@@ -91,6 +106,14 @@ export const HistoryPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 font-mono flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+          <span>{error}</span>
+        </div>
+      )}
 
       {/* Timeline items */}
       {loading ? (
