@@ -159,6 +159,8 @@ export interface ChatMessage {
   metadata?: {
     filesModified?: string[];
     actionRequired?: boolean;
+    failureHint?: string | null;
+    failureStatus?: 'failed' | 'blocked_no_provider';
   };
 }
 

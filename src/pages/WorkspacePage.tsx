@@ -33,11 +33,12 @@ import { Badge } from '../components/common/Badge';
 import { CodeMirrorEditor } from '../components/editor/CodeMirrorEditor';
 import {
   executeApprovalAction,
+  executePromptSubmission,
   executeRejectionAction,
   findActivePendingJob,
+  formatGenerationFailureNotice,
   getAiProviderStatus,
   getApprovalPolicyStatus,
-  parseProposedChanges,
   reconcileSelectedFile,
 } from '../utils/aiWorkflow';
 
@@ -85,6 +86,7 @@ export const WorkspacePage: React.FC = () => {
   const [isLoadingPrompts, setIsLoadingPrompts] = useState(false);
   const [isLoadingMetadata, setIsLoadingMetadata] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorRetryHint, setErrorRetryHint] = useState<string | null>(null);
 
   // Active Pending AI Generation Job & Proposed Changes
   const [pendingJob, setPendingJob] = useState<GenerationJobItem | null>(null);
@@ -111,6 +113,7 @@ export const WorkspacePage: React.FC = () => {
     setProposedChanges([]);
     setSelectedProposedFile(null);
     setErrorMessage(null);
+    setErrorRetryHint(null);
 
     if (!activeProject) {
       setIsLoadingPrompts(false);
@@ -176,6 +179,13 @@ export const WorkspacePage: React.FC = () => {
             });
 
             if (p.response) {
+              const isFailed = p.status === 'failed';
+              const isBlocked = p.status === 'blocked_no_provider';
+              const notice = isFailed
+                ? formatGenerationFailureNotice(p.response, { status: 'failed' })
+                : isBlocked
+                ? formatGenerationFailureNotice(p.response, { status: 'blocked_no_provider' })
+                : null;
               msgs.push({
                 id: `resp-${p.id}`,
                 sender: 'agent',
@@ -184,10 +194,13 @@ export const WorkspacePage: React.FC = () => {
                   hour: '2-digit',
                   minute: '2-digit',
                 }),
-                status:
-                  p.status === 'blocked_no_provider' || p.status === 'failed'
-                    ? 'error'
-                    : 'delivered',
+                status: isFailed || isBlocked ? 'error' : 'delivered',
+                metadata: notice
+                  ? {
+                      failureHint: notice.retryHint,
+                      failureStatus: isBlocked ? 'blocked_no_provider' : 'failed',
+                    }
+                  : undefined,
               });
             }
           });
@@ -277,15 +290,17 @@ export const WorkspacePage: React.FC = () => {
   // Handle prompt submission
   const handleSendPrompt = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!promptInput.trim() || !activeProject) return;
+    if (isSubmittingPrompt || !promptInput.trim() || !activeProject) return;
 
     const userText = promptInput.trim();
+    const msgNonce = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setPromptInput('');
     setIsSubmittingPrompt(true);
     setErrorMessage(null);
+    setErrorRetryHint(null);
 
     const userMsg: ChatMessage = {
-      id: `usr-${Date.now()}`,
+      id: `usr-${msgNonce}`,
       sender: 'user',
       content: userText,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -295,7 +310,7 @@ export const WorkspacePage: React.FC = () => {
     setLogs((prev) => [
       ...prev,
       {
-        id: `log-${Date.now()}`,
+        id: `log-start-${msgNonce}`,
         timestamp: new Date().toLocaleTimeString(),
         level: 'info',
         source: 'agent',
@@ -304,49 +319,60 @@ export const WorkspacePage: React.FC = () => {
     ]);
 
     try {
-      const promptRes = await promptsApi.submit(activeProject.id, userText);
+      const outcome = await executePromptSubmission({
+        projectId: activeProject.id,
+        promptText: userText,
+        aiProviderLabel: health?.ai_provider || 'none',
+        submitPrompt: promptsApi.submit,
+        fetchGenerationJob: jobsApi.getGenerationJob,
+      });
 
-      // Check if a generation job was created with pending proposals
-      if (promptRes.generation_job_id) {
-        try {
-          const job = await jobsApi.getGenerationJob(promptRes.generation_job_id);
-          const changes = parseProposedChanges(job.proposed_changes_json);
-          if (job.status === 'pending_review' && changes.length > 0) {
-            setPendingJob(job);
-            setProposedChanges(changes);
-            setSelectedProposedFile(changes[0]);
-          } else if (pendingJob?.id === job.id) {
-            setPendingJob(null);
-            setProposedChanges([]);
-            setSelectedProposedFile(null);
-          }
-        } catch (jobErr: any) {
-          setErrorMessage(jobErr.message || 'Failed to load generation job details');
-        }
+      if (outcome.pendingProposal) {
+        setPendingJob(outcome.pendingProposal.job);
+        setProposedChanges(outcome.pendingProposal.changes);
+        setSelectedProposedFile(outcome.pendingProposal.changes[0] || null);
+      } else if (outcome.job && pendingJob?.id === outcome.job.id) {
+        setPendingJob(null);
+        setProposedChanges([]);
+        setSelectedProposedFile(null);
+      }
+
+      if (outcome.preservePromptInput) {
+        setPromptInput((prev) => prev || userText);
+      }
+
+      if (outcome.failureStatus === 'failed' && outcome.failureNotice) {
+        setErrorMessage(outcome.failureNotice.message);
+        setErrorRetryHint(outcome.failureNotice.retryHint);
       }
 
       const agentResponseMsg: ChatMessage = {
-        id: `ai-${promptRes.id}`,
+        id: `ai-${outcome.promptRes.id}`,
         sender: 'agent',
-        content:
-          promptRes.response ||
-          `Prompt status: ${promptRes.status}. (AI Provider: ${health?.ai_provider || 'none'})`,
+        content: outcome.agentMessageContent,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        status:
-          promptRes.status === 'blocked_no_provider' || promptRes.status === 'failed'
-            ? 'error'
-            : 'delivered',
+        status: outcome.agentMessageStatus,
+        metadata: outcome.failureNotice
+          ? {
+              failureStatus: outcome.failureStatus,
+              ...(outcome.failureStatus === 'blocked_no_provider'
+                ? { failureHint: outcome.failureNotice.retryHint }
+                : {}),
+            }
+          : undefined,
       };
-      setChatMessages((prev) => [...prev, agentResponseMsg]);
+      setChatMessages((prev) =>
+        prev.some((m) => m.id === agentResponseMsg.id) ? prev : [...prev, agentResponseMsg]
+      );
 
       setLogs((prev) => [
         ...prev,
         {
-          id: `log-${Date.now()}`,
+          id: `log-res-${msgNonce}`,
           timestamp: new Date().toLocaleTimeString(),
-          level: promptRes.status === 'blocked_no_provider' ? 'warn' : 'info',
+          level: outcome.logLevel,
           source: 'agent',
-          message: `Backend response: [${promptRes.status}] ${promptRes.response || ''}`,
+          message: outcome.logMessage,
         },
       ]);
 
@@ -356,18 +382,21 @@ export const WorkspacePage: React.FC = () => {
         .then((data) => setAuditHistory(data))
         .catch(() => {});
     } catch (err: any) {
-      const errMsg = err.message || 'Prompt submission failed';
-      setErrorMessage(errMsg);
+      const failure = formatGenerationFailureNotice(err?.message || 'Prompt submission failed', {
+        httpStatus: err?.status,
+      });
+      setErrorMessage(failure.message);
+      setErrorRetryHint(failure.retryHint);
       setPromptInput((prev) => prev || userText);
 
       setLogs((prev) => [
         ...prev,
         {
-          id: `log-${Date.now()}`,
+          id: `log-err-${msgNonce}`,
           timestamp: new Date().toLocaleTimeString(),
           level: 'error',
           source: 'system',
-          message: `Prompt submission failed: ${errMsg}`,
+          message: `Prompt submission failed: ${failure.message}`,
         },
       ]);
     } finally {
@@ -384,6 +413,7 @@ export const WorkspacePage: React.FC = () => {
 
     setIsApproving(true);
     setErrorMessage(null);
+    setErrorRetryHint(null);
     try {
       const outcome = await executeApprovalAction({
         job: jobToApprove,
@@ -457,6 +487,7 @@ export const WorkspacePage: React.FC = () => {
     const jobToReject = pendingJob;
     setIsRejecting(true);
     setErrorMessage(null);
+    setErrorRetryHint(null);
     try {
       const { updatedJob, confirmationText } = await executeRejectionAction({
         job: jobToReject,
@@ -728,13 +759,26 @@ export const WorkspacePage: React.FC = () => {
 
           {/* Error Banner */}
           {(errorMessage || projectsError) && (
-            <div className="p-2.5 mx-3 mt-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span className="flex-1">{errorMessage || projectsError}</span>
+            <div
+              role="alert"
+              className="p-2.5 mx-3 mt-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-mono flex items-start gap-2"
+            >
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+              <div className="flex-1 space-y-1">
+                <p>{errorMessage || projectsError}</p>
+                {errorMessage && errorRetryHint && (
+                  <p className="text-[11px] text-rose-200/80">{errorRetryHint}</p>
+                )}
+              </div>
               {errorMessage && (
                 <button
-                  onClick={() => setErrorMessage(null)}
+                  type="button"
+                  onClick={() => {
+                    setErrorMessage(null);
+                    setErrorRetryHint(null);
+                  }}
                   className="text-surface-500 hover:text-white"
+                  aria-label="Dismiss error"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -843,8 +887,26 @@ export const WorkspacePage: React.FC = () => {
                 </div>
                 <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
                 {msg.status === 'error' && (
-                  <div className="mt-2 text-[10px] text-amber-400 flex items-center gap-1">
-                    <AlertTriangle className="w-3 h-3" /> Action Notice / Blocked
+                  <div className="mt-2 space-y-1">
+                    <div
+                      className={`text-[10px] flex items-center gap-1 ${
+                        msg.metadata?.failureStatus === 'failed'
+                          ? 'text-rose-400'
+                          : 'text-amber-400'
+                      }`}
+                    >
+                      <AlertTriangle className="w-3 h-3 shrink-0" />
+                      <span>
+                        {msg.metadata?.failureStatus === 'failed'
+                          ? 'Generation Failed'
+                          : 'Action Notice / Blocked'}
+                      </span>
+                    </div>
+                    {msg.metadata?.failureHint && (
+                      <p className="text-[10px] text-surface-400 leading-relaxed">
+                        {msg.metadata.failureHint}
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -873,7 +935,7 @@ export const WorkspacePage: React.FC = () => {
                 variant="primary"
                 size="sm"
                 loading={isSubmittingPrompt}
-                disabled={!activeProject || !promptInput.trim()}
+                disabled={!activeProject || !promptInput.trim() || isSubmittingPrompt}
                 icon={<Send className="w-3.5 h-3.5" />}
               >
                 Submit

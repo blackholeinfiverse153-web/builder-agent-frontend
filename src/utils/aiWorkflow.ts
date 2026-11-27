@@ -280,3 +280,234 @@ export async function executeRejectionAction(params: {
   const confirmationText = `Rejected AI proposal #${updatedJob.id.slice(0, 8)}. Original project files were preserved.`;
   return { updatedJob, confirmationText };
 }
+
+export interface GenerationFailureNotice {
+  message: string;
+  retryHint: string | null;
+  canRetry: boolean;
+}
+
+export function formatGenerationFailureNotice(
+  rawMessage?: string | null,
+  options: { httpStatus?: number; status?: string } = {}
+): GenerationFailureNotice {
+  const cleaned = (rawMessage || '').trim();
+  const lower = cleaned.toLowerCase();
+  const httpStatus = options.httpStatus;
+
+  if (options.status === 'blocked_no_provider' || lower.includes("provider is 'none'")) {
+    return {
+      message:
+        cleaned ||
+        "AI provider is 'none'. Generation blocked until a provider is configured in backend environment.",
+      retryHint:
+        'Configure AI_PROVIDER=gemini and GEMINI_API_KEY in backend .env, then restart the backend.',
+      canRetry: false,
+    };
+  }
+
+  if (
+    httpStatus === 401 ||
+    httpStatus === 403 ||
+    /authentication failed|api key|forbidden|do not own|unauthorized/.test(lower)
+  ) {
+    return {
+      message: cleaned || 'AI provider authentication or permission check failed.',
+      retryHint: 'Verify backend API key credentials or project ownership before trying again.',
+      canRetry: false,
+    };
+  }
+
+  if (/configuration is invalid|model .* unavailable|not configured/.test(lower)) {
+    return {
+      message: cleaned || 'AI provider configuration is invalid or unavailable.',
+      retryHint:
+        'Check AI_PROVIDER, GEMINI_MODEL, and GEMINI_API_KEY in backend .env, then restart the backend.',
+      canRetry: false,
+    };
+  }
+
+  if (httpStatus === 429 || /rate limit|quota|too many/.test(lower)) {
+    return {
+      message: cleaned || 'Rate limit exceeded. Please wait before submitting another prompt.',
+      retryHint: 'Wait a few seconds for cooldown or quota reset, then click Submit manually to retry.',
+      canRetry: true,
+    };
+  }
+
+  if (httpStatus === 409 || /already running|conflict/.test(lower)) {
+    return {
+      message: cleaned || 'A code generation job is already running.',
+      retryHint: 'Wait for the current generation job to finish, then click Submit manually if needed.',
+      canRetry: true,
+    };
+  }
+
+  if (/timed out|timeout|deadline/.test(lower)) {
+    return {
+      message: cleaned || 'AI generation request timed out.',
+      retryHint:
+        'Try breaking your instruction into smaller steps or targeting fewer files, then click Submit manually to retry.',
+      canRetry: true,
+    };
+  }
+
+  if (
+    httpStatus === 400 ||
+    httpStatus === 422 ||
+    /structured json|truncated|incomplete|empty response|did not propose|validation|schema/.test(lower)
+  ) {
+    return {
+      message: cleaned || 'AI response could not be parsed or validated.',
+      retryHint:
+        'Rephrase your instruction with clear target file paths and expected behavior, then click Submit manually to retry.',
+      canRetry: true,
+    };
+  }
+
+  if (
+    httpStatus === 0 ||
+    (httpStatus !== undefined && httpStatus >= 500) ||
+    /network failure|service unavailable/.test(lower)
+  ) {
+    return {
+      message: cleaned || 'Unable to reach AI generation service.',
+      retryHint: 'Check backend connectivity and click Submit manually to retry.',
+      canRetry: true,
+    };
+  }
+
+  return {
+    message: cleaned || 'AI code generation failed.',
+    retryHint: 'Review your prompt and click Submit manually to try again.',
+    canRetry: true,
+  };
+}
+
+export interface PromptSubmissionOutcome {
+  promptRes: PromptItem;
+  job: GenerationJobItem | null;
+  pendingProposal: PendingJobResolution | null;
+  agentMessageContent: string;
+  agentMessageStatus: 'delivered' | 'error';
+  failureStatus?: 'failed' | 'blocked_no_provider';
+  failureNotice: GenerationFailureNotice | null;
+  logLevel: 'info' | 'warn' | 'error';
+  logMessage: string;
+  preservePromptInput: boolean;
+}
+
+export async function executePromptSubmission(params: {
+  projectId: string;
+  promptText: string;
+  aiProviderLabel?: string;
+  submitPrompt: (projectId: string, text: string) => Promise<PromptItem>;
+  fetchGenerationJob: (jobId: string) => Promise<GenerationJobItem>;
+}): Promise<PromptSubmissionOutcome> {
+  const { projectId, promptText, aiProviderLabel = 'none', submitPrompt, fetchGenerationJob } = params;
+  const promptRes = await submitPrompt(projectId, promptText);
+
+  let job: GenerationJobItem | null = null;
+  let jobLoadError: string | null = null;
+  if (promptRes.generation_job_id) {
+    try {
+      job = await fetchGenerationJob(promptRes.generation_job_id);
+    } catch (err: any) {
+      jobLoadError = err?.message || 'Failed to load generation job details';
+    }
+  }
+
+  const isBlocked =
+    promptRes.status === 'blocked_no_provider' || job?.status === 'blocked_no_provider';
+  const isFailed = !isBlocked && (promptRes.status === 'failed' || job?.status === 'failed');
+
+  if (isFailed) {
+    const rawReason =
+      job?.error_message || promptRes.response || 'AI code generation failed.';
+    const notice = formatGenerationFailureNotice(rawReason, { status: 'failed' });
+    return {
+      promptRes,
+      job,
+      pendingProposal: null,
+      agentMessageContent: notice.message,
+      agentMessageStatus: 'error',
+      failureStatus: 'failed',
+      failureNotice: notice,
+      logLevel: 'error',
+      logMessage: `AI generation failed: ${notice.message}`,
+      preservePromptInput: true,
+    };
+  }
+
+  if (isBlocked) {
+    const blockedMsg =
+      promptRes.response ||
+      job?.error_message ||
+      `Prompt status: ${promptRes.status}. (AI Provider: ${aiProviderLabel})`;
+    const notice = formatGenerationFailureNotice(blockedMsg, {
+      status: 'blocked_no_provider',
+    });
+    return {
+      promptRes,
+      job,
+      pendingProposal: null,
+      agentMessageContent: blockedMsg,
+      agentMessageStatus: 'error',
+      failureStatus: 'blocked_no_provider',
+      failureNotice: notice,
+      logLevel: 'warn',
+      logMessage: `Backend response: [${promptRes.status}] ${blockedMsg}`,
+      preservePromptInput: false,
+    };
+  }
+
+  const parsedChanges = job ? parseProposedChanges(job.proposed_changes_json) : [];
+  if (job && job.status === 'pending_review' && parsedChanges.length > 0) {
+    const content =
+      promptRes.response ||
+      job.explanation ||
+      `Generated ${parsedChanges.length} proposed change(s) pending your review.`;
+    return {
+      promptRes,
+      job,
+      pendingProposal: { job, changes: parsedChanges },
+      agentMessageContent: content,
+      agentMessageStatus: 'delivered',
+      failureNotice: null,
+      logLevel: 'info',
+      logMessage: `Backend response: [${promptRes.status}] ${content}`,
+      preservePromptInput: false,
+    };
+  }
+
+  if (jobLoadError) {
+    const notice = formatGenerationFailureNotice(jobLoadError);
+    return {
+      promptRes,
+      job: null,
+      pendingProposal: null,
+      agentMessageContent: promptRes.response || jobLoadError,
+      agentMessageStatus: 'error',
+      failureStatus: 'failed',
+      failureNotice: notice,
+      logLevel: 'error',
+      logMessage: `Generation job lookup failed: ${notice.message}`,
+      preservePromptInput: false,
+    };
+  }
+
+  const fallbackContent =
+    promptRes.response ||
+    `Prompt status: ${promptRes.status}. (AI Provider: ${aiProviderLabel})`;
+  return {
+    promptRes,
+    job,
+    pendingProposal: null,
+    agentMessageContent: fallbackContent,
+    agentMessageStatus: 'delivered',
+    failureNotice: null,
+    logLevel: 'info',
+    logMessage: `Backend response: [${promptRes.status}] ${fallbackContent}`,
+    preservePromptInput: false,
+  };
+}

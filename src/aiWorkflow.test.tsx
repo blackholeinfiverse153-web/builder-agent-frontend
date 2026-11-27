@@ -3,9 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { StaticRouter } from 'react-router-dom/server';
 import {
   executeApprovalAction,
+  executePromptSubmission,
   executeRejectionAction,
   filterActivityHistory,
   findActivePendingJob,
+  formatGenerationFailureNotice,
   getAiProviderStatus,
   getApprovalPolicyStatus,
   reconcileSelectedFile,
@@ -15,12 +17,14 @@ import {
   ActivityHistoryRecord,
   GenerationJobItem,
   HealthData,
+  Project,
   ProjectFile,
   PromptItem,
 } from './types';
 import { DashboardPage } from './pages/DashboardPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HistoryPage } from './pages/HistoryPage';
+import { WorkspacePage } from './pages/WorkspacePage';
 import { TopNav } from './components/layout/TopNav';
 
 const mockUseHealth = vi.fn();
@@ -419,6 +423,170 @@ describe('Phase 2 Step 2.3 — AI Workflow, Telemetry & Error Handling', () => {
         })
       ).rejects.toThrow("Cannot modify or delete '/src': target path is a folder.");
       expect(fetchFilesSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Phase 5 Step 2 — Frontend Generation Failure UX', () => {
+    it('builds actionable failure messages and retry hints only when appropriate', () => {
+      const rateLimited = formatGenerationFailureNotice(
+        'AI provider rate limit exceeded. Please wait before retrying.',
+        { status: 'failed' }
+      );
+      expect(rateLimited.canRetry).toBe(true);
+      expect(rateLimited.retryHint).toContain('click Submit manually to retry');
+
+      const timedOut = formatGenerationFailureNotice(
+        'AI provider request timed out after 45s.',
+        { status: 'failed' }
+      );
+      expect(timedOut.canRetry).toBe(true);
+      expect(timedOut.retryHint).toContain('smaller steps');
+
+      const malformed = formatGenerationFailureNotice(
+        'Failed to parse structured JSON from Gemini response (output appears truncated or incomplete).',
+        { status: 'failed' }
+      );
+      expect(malformed.canRetry).toBe(true);
+      expect(malformed.retryHint).toContain('Rephrase your instruction');
+
+      const authFailed = formatGenerationFailureNotice(
+        'AI provider authentication failed. Check backend API key configuration.',
+        { status: 'failed' }
+      );
+      expect(authFailed.canRetry).toBe(false);
+      expect(authFailed.retryHint).toContain('Verify backend API key credentials');
+
+      const blocked = formatGenerationFailureNotice(
+        "AI provider is 'none'. Generation blocked until a provider is configured in backend environment.",
+        { status: 'blocked_no_provider' }
+      );
+      expect(blocked.canRetry).toBe(false);
+      expect(blocked.retryHint).toContain('AI_PROVIDER=gemini');
+    });
+
+    it('preserves user prompt, shows actionable failure notice, and never auto-resubmits or emits success when job fails', async () => {
+      const submitSpy = vi.fn(async (): Promise<PromptItem> => ({
+        id: 'pr-fail-1',
+        project_id: 'p1',
+        user_id: 'u1',
+        text: 'Add /billing endpoint with tests',
+        status: 'failed',
+        response: 'Failed to parse structured JSON from Gemini response.',
+        generation_job_id: 'job-fail-1',
+        created_at: '2026-11-27T00:00:00Z',
+      }));
+      const fetchJobSpy = vi.fn(async (): Promise<GenerationJobItem> => ({
+        id: 'job-fail-1',
+        project_id: 'p1',
+        prompt_id: 'pr-fail-1',
+        status: 'failed',
+        ai_provider: 'gemini',
+        model: 'gemini-2.5-flash',
+        error_message: 'AI provider request timed out after 45s.',
+        created_at: '2026-11-27T00:00:00Z',
+        completed_at: '2026-11-27T00:00:45Z',
+      }));
+
+      const outcome = await executePromptSubmission({
+        projectId: 'p1',
+        promptText: 'Add /billing endpoint with tests',
+        aiProviderLabel: 'gemini',
+        submitPrompt: submitSpy,
+        fetchGenerationJob: fetchJobSpy,
+      });
+
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      expect(fetchJobSpy).toHaveBeenCalledTimes(1);
+      expect(outcome.pendingProposal).toBeNull();
+      expect(outcome.agentMessageStatus).toBe('error');
+      expect(outcome.failureStatus).toBe('failed');
+      expect(outcome.preservePromptInput).toBe(true);
+      expect(outcome.logLevel).toBe('error');
+      expect(outcome.failureNotice?.message).toBe('AI provider request timed out after 45s.');
+      expect(outcome.failureNotice?.retryHint).toContain('click Submit manually to retry');
+      expect(outcome.agentMessageContent).not.toContain('Approved');
+      expect(outcome.agentMessageContent).not.toContain('completed');
+    });
+
+    it('clears prompt input and loads pending review proposal without failure notices on success', async () => {
+      const submitSpy = vi.fn(async (): Promise<PromptItem> => ({
+        id: 'pr-ok-1',
+        project_id: 'p1',
+        user_id: 'u1',
+        text: 'Add /health route',
+        status: 'pending_review',
+        response: 'Created /health.py',
+        generation_job_id: 'job-ok-1',
+        created_at: '2026-11-27T00:00:00Z',
+      }));
+      const fetchJobSpy = vi.fn(async (): Promise<GenerationJobItem> => ({
+        id: 'job-ok-1',
+        project_id: 'p1',
+        prompt_id: 'pr-ok-1',
+        status: 'pending_review',
+        ai_provider: 'gemini',
+        model: 'gemini-2.5-flash',
+        explanation: 'Created /health.py',
+        proposed_changes_json: JSON.stringify([
+          { path: '/health.py', content: 'ok = True\n', language: 'python', action: 'create' },
+        ]),
+        created_at: '2026-11-27T00:00:00Z',
+      }));
+
+      const outcome = await executePromptSubmission({
+        projectId: 'p1',
+        promptText: 'Add /health route',
+        aiProviderLabel: 'gemini',
+        submitPrompt: submitSpy,
+        fetchGenerationJob: fetchJobSpy,
+      });
+
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      expect(fetchJobSpy).toHaveBeenCalledTimes(1);
+      expect(outcome.preservePromptInput).toBe(false);
+      expect(outcome.failureNotice).toBeNull();
+      expect(outcome.agentMessageStatus).toBe('delivered');
+      expect(outcome.pendingProposal?.changes).toHaveLength(1);
+      expect(outcome.logLevel).toBe('info');
+    });
+
+    it('renders WorkspacePage prompt workflow cleanly with active Gemini telemetry', () => {
+      const project: Project = {
+        id: 'p1',
+        user_id: 'u1',
+        name: 'demo-app',
+        language: 'python',
+        framework: 'fastapi',
+        status: 'active',
+        created_at: '2026-11-27T00:00:00Z',
+        updated_at: '2026-11-27T00:00:00Z',
+      };
+      mockUseHealth.mockReturnValue({
+        health: { ...baseHealth, ai_provider: 'gemini', require_human_approval: true },
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+      });
+      mockUseProjects.mockReturnValue({
+        projects: [project],
+        activeProject: project,
+        activeProjectId: project.id,
+        currentFiles: [],
+        loading: false,
+        error: null,
+        filesLoading: false,
+        filesError: null,
+        setActiveProjectId: vi.fn(),
+        addFile: vi.fn(),
+        deleteFile: vi.fn(),
+        fetchProjectFiles: vi.fn(),
+      });
+
+      const html = renderToStaticMarkup(<WorkspacePage />);
+      expect(html).toContain('Agent Conversation');
+      expect(html).toContain('AI Provider: Gemini');
+      expect(html).toContain('Human Gate: Required');
+      expect(html).toContain('Submit');
     });
   });
 });
